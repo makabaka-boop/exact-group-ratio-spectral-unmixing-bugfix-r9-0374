@@ -1,8 +1,59 @@
-<!doctype html><meta charset="utf-8"><title>固定比例光谱复核</title><h1>组比例约束解混</h1><textarea id="request" rows="18" cols="100"></textarea><button id="run">精确复核</button><output id="status"></output><svg id="chart" width="600" height="220"></svg><pre id="result"></pre><button id="download">下载同次结果</button><script>
-const $=id=>document.getElementById(id);let generation=0,result=null;
-$('request').value=JSON.stringify({input:{wavelengths:Array.from({length:20},(_,i)=>i),observations:[3,4,...Array(18).fill(0)],references:[[1,0,...Array(18).fill(0)],[0,1,...Array(18).fill(0)]]},groups:[{id:'blend',members:[{index:0,ratio:{num:'1',den:'1'}},{index:1,ratio:{num:'2',den:'1'}}]}]},null,2);
-function clear(){generation++;result=null;$('result').textContent='';$('chart').innerHTML='';$('status').textContent='输入已变化';}
-$('request').oninput=clear;
-$('run').onclick=async()=>{const token=generation,body=$('request').value;result=null;try{const response=await fetch('/api/grouped',{method:'POST',headers:{'Content-Type':'application/json'},body});const candidate=await response.json();if(token!==generation)return;if(!response.ok)throw Error(candidate.error?.message||'请求失败');result=candidate;$('result').textContent=JSON.stringify(result,null,2);$('status').textContent='精确复核完成';$('chart').innerHTML='';for(const [name,color] of [['observed','blue'],['reconstructed','green'],['residual','red']]){const values=result.points.map(point=>typeof point[name]==='number'?point[name]:Number(point[name].numerator)/Number(point[name].denominator));const maximum=Math.max(1,...result.points.flatMap(point=>['observed','reconstructed','residual'].map(key=>Math.abs(typeof point[key]==='number'?point[key]:Number(point[key].numerator)/Number(point[key].denominator)))));const path=document.createElementNS('http://www.w3.org/2000/svg','polyline');path.setAttribute('points',values.map((v,i)=>((result.points[i].wavelength-result.points[0].wavelength)*580/(result.points.at(-1).wavelength-result.points[0].wavelength)+10)+','+(110-v/maximum*90)).join(' '));path.setAttribute('fill','none');path.setAttribute('stroke',color);path.dataset.series=name;$('chart').append(path);}}catch(error){if(token===generation){$('status').textContent='拒绝：'+error.message;$('chart').innerHTML='';$('result').textContent='';}}};
-$('download').onclick=()=>{if(!result)return;const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='grouped-spectrum.json';a.click();URL.revokeObjectURL(url);};
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>固定比例光谱复核</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1.5rem auto; max-width: 980px; padding: 0 1rem; color: #1a1a2e; }
+  h1 { font-size: 1.35rem; margin-bottom: .2rem; }
+  .sub { color: #666; font-size: .88rem; margin-top: 0; }
+  label { display: block; font-weight: 600; margin: .8rem 0 .3rem; }
+  textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, monospace; font-size: .82rem; }
+  button { margin: .6rem .6rem .6rem 0; padding: .45rem 1.1rem; border: 1px solid #3455a5; background: #3455a5; color: #fff; border-radius: 4px; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #download { background: #fff; color: #3455a5; }
+  #status { font-weight: 600; }
+  .stale-banner { background: #fff3cd; border: 1px solid #e0a800; border-radius: 4px; padding: .5rem .8rem; margin: .6rem 0; font-size: .9rem; }
+  .stale-content { opacity: .45; }
+  #summary { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .82rem; line-height: 1.5; word-break: break-all; }
+  .legend { font-size: .82rem; margin-top: .4rem; }
+  .legend span { margin-right: 1.1rem; }
+  svg { border: 1px solid #ddd; margin-top: .3rem; background: #fafafa; }
+  pre { background: #f6f6f6; padding: .6rem; overflow: auto; font-size: .78rem; max-height: 320px; }
+</style>
+
+<h1>组比例约束解混复核</h1>
+<p class="sub">非负组变量 × 组内固定有理比例 ＝ 原曲线系数 · 对原观测的精确平方残差最优 · 全程有理数</p>
+
+<label for="request">完整请求（input ＋ groups，JSON；每条参考曲线恰好属于一个组）</label>
+<textarea id="request" rows="18" spellcheck="false"></textarea>
+
+<div>
+  <button id="run">精确复核</button>
+  <button id="download" disabled>下载同次结果 CSV</button>
+  <output id="status"></output>
+</div>
+
+<div id="stale" class="stale-banner" hidden>
+  ⚠ 输入（光谱或组清单）已被修改：以下图表与数据属于<strong>旧响应</strong>，
+  不能作为当前请求的结论；下载已锁定，请重新「精确复核」。
+</div>
+
+<div id="content">
+  <div id="summary"></div>
+  <div class="legend">
+    <span style="color:#1565c0">— 观测</span>
+    <span style="color:#2e7d32">— 重建</span>
+    <span style="color:#c62828">— 残差</span>
+  </div>
+  <svg id="chart" width="640" height="240" role="img" aria-label="观测、重建与残差曲线"></svg>
+  <details>
+    <summary>原始响应 JSON（精确分数）</summary>
+    <pre id="result"></pre>
+  </details>
+</div>
+
+<script type="module">
+  import { boot, SAMPLE_REQUEST } from "/groups-page.js";
+  boot(SAMPLE_REQUEST);
 </script>

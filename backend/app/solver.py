@@ -14,6 +14,7 @@ support is a complete search.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
@@ -94,12 +95,15 @@ def _solve_linear(a: list[list[Fraction]], b: list[Fraction]) -> list[Fraction]:
 
 
 def solve_nonnegative_least_squares(
-    observations: list[int], references: list[list[int]]
+    observations: Sequence[int | Fraction],
+    references: Sequence[Sequence[int | Fraction]],
 ) -> SolveResult:
     """Return exact non-negative rational coefficients.
 
     Minimises ``sum_i (y_i - sum_j A_ij x_j)^2`` subject to ``x_j >= 0``,
-    by exhaustive support enumeration.
+    by exhaustive support enumeration.  Columns may be integers or
+    Fractions (the grouped fitter passes rational effective columns);
+    every computation stays exact either way.
     """
     n = len(observations)
     k = len(references)

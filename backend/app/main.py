@@ -12,6 +12,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 from .models import (
     SolveRequest,
@@ -21,7 +22,7 @@ from .models import (
 )
 from .solver import rational_rank, solve_nonnegative_least_squares
 
-from .grouped import solve_grouped
+from .grouped import GroupedError, solve_grouped
 
 app = FastAPI(
     title="Spectrum NNLS Solver",
@@ -35,18 +36,19 @@ app = FastAPI(
 
 
 class ApiError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, details: object = None):
         self.code = code
         self.message = message
+        self.details = details
         super().__init__(message)
 
 
 @app.exception_handler(ApiError)
 async def api_error_handler(_request: Request, exc: ApiError):
-    return JSONResponse(
-        status_code=422,
-        content={"error": {"code": exc.code, "message": exc.message}},
-    )
+    error: dict = {"code": exc.code, "message": exc.message}
+    if exc.details is not None:
+        error["details"] = exc.details
+    return JSONResponse(status_code=422, content={"error": error})
 
 
 @app.exception_handler(RequestValidationError)
@@ -221,16 +223,91 @@ if _DIST.is_dir():
         return FileResponse(_DIST / "index.html")
 
 
-@app.post("/api/grouped")
-async def grouped(body: dict):
+def _run_grouped(body: dict) -> dict:
+    """Validate and solve a grouped request, mapping every failure mode
+    onto the unified 422 rejection envelope (no partial results)."""
     try:
         return solve_grouped(body, _validate)
     except ApiError:
         raise
+    except GroupedError as error:
+        raise ApiError(error.code, str(error)) from error
+    except ValidationError as error:
+        # Schema-level violation inside the embedded spectrum input.
+        raise ApiError(
+            "invalid_schema",
+            "request rejected; all fields must be valid",
+            jsonable_encoder(error.errors()),
+        ) from error
     except (ValueError, TypeError, KeyError, IndexError) as error:
         raise ApiError("invalid_grouped_request", str(error)) from error
+
+
+def _csv_quote(value: object) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+@app.post("/api/grouped")
+async def grouped(body: dict):
+    return _run_grouped(body)
+
+
+@app.post("/api/grouped/download")
+async def grouped_download(body: dict):
+    """Exact CSV for a grouped request, recomputed from the posted body —
+    the same binding rule as /api/download: a download can never be
+    fabricated from a stale response to a different request."""
+    result = _run_grouped(body)
+    digest = result["input_digest"]
+    buf = io.StringIO()
+    buf.write(f"# input_digest,{digest}\n")
+    buf.write(
+        "# group_coefficients,"
+        + ";".join(
+            f"{_csv_quote(g['id'])}={g['value']['fraction']}"
+            for g in result["groupCoefficients"]
+        )
+        + "\n"
+    )
+    buf.write(
+        "# coefficients,"
+        + ";".join(
+            f"{c['index']}={c['value']['fraction']}" for c in result["coefficients"]
+        )
+        + "\n"
+    )
+    buf.write(f"# rss,{result['rss']['fraction']}\n")
+    buf.write(
+        "wavelength,observed,reconstructed_num,reconstructed_den,"
+        "reconstructed_fraction,residual_num,residual_den,"
+        "residual_fraction\n"
+    )
+    for p in result["points"]:
+        buf.write(
+            f"{p['wavelength']},{p['observed']},"
+            f"{p['reconstructed']['numerator']},{p['reconstructed']['denominator']},"
+            f"{p['reconstructed']['fraction']},"
+            f"{p['residual']['numerator']},{p['residual']['denominator']},"
+            f"{p['residual']['fraction']}\n"
+        )
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="grouped-{digest[:12]}.csv"'
+            )
+        },
+    )
 
 
 @app.get("/groups")
 async def grouped_page():
     return FileResponse(Path(__file__).with_name("groups.html"))
+
+
+@app.get("/groups-page.js", include_in_schema=False)
+async def grouped_page_script():
+    return FileResponse(
+        Path(__file__).with_name("groups_page.js"), media_type="text/javascript"
+    )
