@@ -1,8 +1,434 @@
-<!doctype html><meta charset="utf-8"><title>固定比例光谱复核</title><h1>组比例约束解混</h1><textarea id="request" rows="18" cols="100"></textarea><button id="run">精确复核</button><output id="status"></output><svg id="chart" width="600" height="220"></svg><pre id="result"></pre><button id="download">下载同次结果</button><script>
-const $=id=>document.getElementById(id);let generation=0,result=null;
-$('request').value=JSON.stringify({input:{wavelengths:Array.from({length:20},(_,i)=>i),observations:[3,4,...Array(18).fill(0)],references:[[1,0,...Array(18).fill(0)],[0,1,...Array(18).fill(0)]]},groups:[{id:'blend',members:[{index:0,ratio:{num:'1',den:'1'}},{index:1,ratio:{num:'2',den:'1'}}]}]},null,2);
-function clear(){generation++;result=null;$('result').textContent='';$('chart').innerHTML='';$('status').textContent='输入已变化';}
-$('request').oninput=clear;
-$('run').onclick=async()=>{const token=generation,body=$('request').value;result=null;try{const response=await fetch('/api/grouped',{method:'POST',headers:{'Content-Type':'application/json'},body});const candidate=await response.json();if(token!==generation)return;if(!response.ok)throw Error(candidate.error?.message||'请求失败');result=candidate;$('result').textContent=JSON.stringify(result,null,2);$('status').textContent='精确复核完成';$('chart').innerHTML='';for(const [name,color] of [['observed','blue'],['reconstructed','green'],['residual','red']]){const values=result.points.map(point=>typeof point[name]==='number'?point[name]:Number(point[name].numerator)/Number(point[name].denominator));const maximum=Math.max(1,...result.points.flatMap(point=>['observed','reconstructed','residual'].map(key=>Math.abs(typeof point[key]==='number'?point[key]:Number(point[key].numerator)/Number(point[key].denominator)))));const path=document.createElementNS('http://www.w3.org/2000/svg','polyline');path.setAttribute('points',values.map((v,i)=>((result.points[i].wavelength-result.points[0].wavelength)*580/(result.points.at(-1).wavelength-result.points[0].wavelength)+10)+','+(110-v/maximum*90)).join(' '));path.setAttribute('fill','none');path.setAttribute('stroke',color);path.dataset.series=name;$('chart').append(path);}}catch(error){if(token===generation){$('status').textContent='拒绝：'+error.message;$('chart').innerHTML='';$('result').textContent='';}}};
-$('download').onclick=()=>{if(!result)return;const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='grouped-spectrum.json';a.click();URL.revokeObjectURL(url);};
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>固定比例光谱组复核</title>
+<style>
+  :root {
+    --ink:#0f172a; --muted:#475569; --line:#e2e8f0; --panel:#ffffff;
+    --bg:#f1f5f9; --blue:#2563eb; --red:#dc2626; --purple:#7c3aed;
+    --warn-bg:#fef3c7; --warn-bd:#f59e0b; --err-bg:#fee2e2; --err-bd:#ef4444;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+        background:var(--bg); color:var(--ink); }
+  header { padding:18px 24px 6px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin:0; }
+  .layout { display:grid; grid-template-columns:minmax(340px,460px) 1fr; gap:16px; padding:16px 24px; }
+  @media (max-width:980px){ .layout{ grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  label { display:block; font-size:13px; font-weight:600; margin:10px 0 4px; }
+  textarea { width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+             font-size:12px; border:1px solid var(--line); border-radius:8px; padding:8px; resize:vertical; }
+  button { cursor:pointer; border-radius:8px; border:1px solid var(--line); background:#fff;
+           padding:8px 16px; font-size:14px; }
+  button.primary { background:var(--blue); color:#fff; border-color:var(--blue); }
+  button:disabled { cursor:not-allowed; opacity:.45; }
+  #status { margin-left:10px; font-size:13px; color:var(--muted); }
+  .banner { margin:10px 0; padding:10px 12px; border-radius:8px; font-size:13px; }
+  .stale { background:var(--warn-bg); border:1px solid var(--warn-bd); }
+  .error { background:var(--err-bg); border:1px solid var(--err-bd); }
+  .stale-content { opacity:.55; filter:grayscale(.6); pointer-events:none; }
+  table { border-collapse:collapse; width:100%; font-size:13px; margin:8px 0 14px; }
+  th, td { border:1px solid var(--line); padding:5px 8px; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  th { background:#f8fafc; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .zero-row { color:var(--muted); }
+  .meta { display:flex; gap:24px; flex-wrap:wrap; margin:6px 0 10px; }
+  .meta .k { font-size:12px; color:var(--muted); display:block; }
+  .meta .v { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:15px; }
+  .chart-wrap { overflow-x:auto; }
+  details summary { cursor:pointer; font-size:13px; font-weight:600; margin:8px 0; }
+  .hint { font-size:12px; color:var(--muted); margin-top:8px; }
+  footer { padding:8px 24px 24px; font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>固定组比例解混 · 精确复核台</h1>
+  <p class="sub">组变量非负；原曲线系数 = 组变量 × 组内有理比例。全程 Fraction 精确算术，最优性针对原观测精确平方残差。</p>
+</header>
+
+<div class="layout">
+  <section class="panel">
+    <label for="request">完整请求（input 光谱 + groups 组清单；比例 num/den 为 1..1000000 的整数或十进制整数字符串）</label>
+    <textarea id="request" rows="22" spellcheck="false"></textarea>
+    <div style="margin-top:10px">
+      <button id="run" class="primary">精确复核</button>
+      <span id="status">尚未求解</span>
+    </div>
+    <p class="hint">任何编辑都会使上一次结果立即失效（横幅提示、图表灰化、下载锁定），必须重新复核。重排组清单不改变原曲线系数。</p>
+  </section>
+
+  <section class="panel" id="result-panel">
+    <div id="stale-box"></div>
+    <div id="error-box"></div>
+    <div id="content">
+      <p style="color:var(--muted);font-size:13px">提交合法请求后在此显示精确结果、并列图与下载。</p>
+    </div>
+  </section>
+</div>
+
+<footer>结果与输入以 SHA-256 规范指纹绑定；页面图与下载 CSV 来自同一次完整请求（服务端对同一 input+groups 重算）。原无组求解见 <a href="/">/</a>。</footer>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+// --- default sample: 24 points, two independent-ish curves, two groups,
+//     fractional ratios (1/2 and 1/3); y built so the answer is nontrivial.
+const sample = () => {
+  const n = 24;
+  const wavelengths = Array.from({ length: n }, (_, i) => 400 + i);
+  const c0 = [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3];
+  const c1 = [0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1];
+  const c2 = c0.map((v, i) => v + (i % 5));
+  // group A: curves 0,1 with ratios 1/2 and 1 ; group B: curve 2 ratio 1/3.
+  // choose group variables tA=2, tB=3:
+  //   y = 2*(1/2 c0 + c1) + 3*(1/3 c2) = c0 + 2 c1 + c2  (exact fit)
+  const observations = c0.map((v, i) => v + 2 * c1[i] + c2[i]);
+  return {
+    input: { wavelengths, observations, references: [c0, c1, c2] },
+    groups: [
+      { id: "A", members: [
+        { index: 0, ratio: { num: "1", den: "2" } },
+        { index: 1, ratio: { num: "1", den: "1" } },
+      ] },
+      { id: "B", members: [
+        { index: 2, ratio: { num: "1", den: "3" } },
+      ] },
+    ],
+  };
+};
+$("request").value = JSON.stringify(sample(), null, 2);
+
+// --- freshness: bumping the generation voids every in-flight result.
+// Editing keeps the previous response on screen but marks it stale
+// (banner + greyed chart + locked download); it can never back the new
+// input until a fresh solve for the current editor content succeeds.
+let generation = 0;
+let result = null;
+let solvedBodyText = null;
+
+function markStale() {
+  generation += 1; // any in-flight response is now superseded
+  render();
+}
+$("request").addEventListener("input", markStale);
+
+// --- exact rational helpers for client-side consistency cross-checks
+function fracValue(r) {
+  // display-only decimal; arithmetic checks below use cross multiplication
+  return [Number(r.numerator), Number(r.denominator)];
+}
+function dec(r) {
+  const [n, d] = fracValue(r);
+  if (!Number.isFinite(n / d)) return r.decimal;
+  return r.decimal;
+}
+
+// --- chart (mirrors the React review page): top observed/reconstructed,
+//     bottom residual stems with a zero line.
+const W = 760, H_TOP = 320, H_BOT = 200;
+const M = { top: 26, right: 24, bottom: 34, left: 64 }, GAP = 46;
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(name, attrs, parent) {
+  const node = document.createElementNS(SVGNS, name);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+function niceTicks(min, max, count = 5) {
+  if (min === max) return [min];
+  const raw = (max - min) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag;
+  const ticks = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step)
+    ticks.push(Math.abs(v) < step * 1e-9 ? 0 : Number(v.toFixed(10)));
+  return ticks;
+}
+function drawChart(points) {
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H_TOP + GAP + H_BOT}`,
+    width: "100%", role: "img", "aria-label": "观测、重建与残差并列图" });
+  const xs = points.map((p) => p.wavelength);
+  const observed = points.map((p) => p.observed);
+  const recon = points.map((p) => Number(p.reconstructed.decimal));
+  const resid = points.map((p) => Number(p.residual.decimal));
+  const xMin = xs[0], xMax = xs[xs.length - 1];
+  const yMin = Math.min(...observed, ...recon);
+  const yMax = Math.max(...observed, ...recon);
+  const rMin = Math.min(0, ...resid), rMax = Math.max(0, ...resid);
+  const plotW = W - M.left - M.right;
+  const topH = H_TOP - M.top - M.bottom, botH = H_BOT - 20 - M.bottom;
+  const sx = (x) => M.left + ((x - xMin) / (xMax - xMin || 1)) * plotW;
+  const syT = (y) => M.top + topH - ((y - yMin) / (yMax - yMin || 1)) * topH;
+  const syB = (r) => 20 + botH - ((r - rMin) / (rMax - rMin || 1)) * botH;
+  const path = (vals, sy) => vals.map((v, i) =>
+    `${i === 0 ? "M" : "L"}${sx(xs[i]).toFixed(2)},${sy(v).toFixed(2)}`).join(" ");
+
+  // top panel
+  el("rect", { x: M.left, y: M.top, width: plotW, height: topH,
+    fill: "#f8fafc", stroke: "#e2e8f0" }, svg);
+  for (const t of niceTicks(yMin, yMax)) {
+    el("line", { x1: M.left, x2: W - M.right, y1: syT(t), y2: syT(t),
+      stroke: "#e2e8f0" }, svg);
+    const txt = el("text", { x: M.left - 8, y: syT(t) + 4, "text-anchor": "end",
+      "font-size": 11, fill: "#475569" }, svg);
+    txt.textContent = t;
+  }
+  const xStep = Math.max(1, Math.round(points.length / 8));
+  xs.forEach((x, i) => {
+    if (i % xStep !== 0) return;
+    const txt = el("text", { x: sx(x), y: H_TOP - 10, "text-anchor": "middle",
+      "font-size": 11, fill: "#475569" }, svg);
+    txt.textContent = x;
+  });
+  el("path", { d: path(observed, syT), fill: "none", stroke: "#2563eb", "stroke-width": 2 }, svg);
+  el("path", { d: path(recon, syT), fill: "none", stroke: "#dc2626",
+    "stroke-width": 2, "stroke-dasharray": "6 3" }, svg);
+  points.forEach((p, i) => el("circle", { cx: sx(p.wavelength), cy: syT(p.observed),
+    r: 2.4, fill: "#2563eb" }, svg));
+  let t = el("text", { x: M.left, y: 16, "font-size": 12, "font-weight": 600 }, svg);
+  t.textContent = "观测 vs 重建（组比例共同重建）";
+  const legend = el("g", { transform: `translate(${W - M.right - 240},10)` }, svg);
+  el("line", { x1: 0, y1: 6, x2: 26, y2: 6, stroke: "#2563eb", "stroke-width": 2 }, legend);
+  let lt = el("text", { x: 32, y: 10, "font-size": 11, fill: "#475569" }, legend);
+  lt.textContent = "观测";
+  el("line", { x1: 80, y1: 6, x2: 106, y2: 6, stroke: "#dc2626", "stroke-width": 2,
+    "stroke-dasharray": "6 3" }, legend);
+  lt = el("text", { x: 112, y: 10, "font-size": 11, fill: "#475569" }, legend);
+  lt.textContent = "重建";
+
+  // bottom panel
+  const bot = el("g", { transform: `translate(0,${H_TOP + GAP})` }, svg);
+  el("rect", { x: M.left, y: 20, width: plotW, height: botH,
+    fill: "#faf5ff", stroke: "#e2e8f0" }, bot);
+  for (const tv of niceTicks(rMin, rMax)) {
+    el("line", { x1: M.left, x2: W - M.right, y1: syB(tv), y2: syB(tv),
+      stroke: tv === 0 ? "#94a3b8" : "#ede9fe", "stroke-width": tv === 0 ? 1.5 : 1 }, bot);
+    const txt = el("text", { x: M.left - 8, y: syB(tv) + 4, "text-anchor": "end",
+      "font-size": 11, fill: "#475569" }, bot);
+    txt.textContent = tv;
+  }
+  xs.forEach((x, i) => {
+    if (i % xStep !== 0) return;
+    const txt = el("text", { x: sx(x), y: H_BOT - 8, "text-anchor": "middle",
+      "font-size": 11, fill: "#475569" }, bot);
+    txt.textContent = x;
+  });
+  const zeroY = syB(0);
+  points.forEach((p) => el("line", { x1: sx(p.wavelength), x2: sx(p.wavelength),
+    y1: zeroY, y2: syB(Number(p.residual.decimal)), stroke: "#7c3aed",
+    "stroke-width": 1.4, opacity: 0.7 }, bot));
+  el("path", { d: path(resid, syB), fill: "none", stroke: "#7c3aed", "stroke-width": 2 }, bot);
+  t = el("text", { x: M.left, y: 14, "font-size": 12, "font-weight": 600 }, bot);
+  t.textContent = "逐点残差（观测 − 重建）";
+  return svg;
+}
+
+// --- client-side rational cross check of the delivered point evidence
+function checkConsistency(points) {
+  // residual == observed - reconstructed and reconstructed carries the same
+  // value as num/den; checked by exact integer cross multiplication.
+  for (const p of points) {
+    const rn = BigInt(p.residual.numerator), rd = BigInt(p.residual.denominator);
+    const en = BigInt(p.reconstructed.numerator), ed = BigInt(p.reconstructed.denominator);
+    const y = BigInt(p.observed);
+    // rn/rd == y - en/ed  <=> rn*ed == y*rd*ed - en*rd
+    if (rn * ed !== y * rd * ed - en * rd) return false;
+  }
+  return true;
+}
+
+function ratioText(r) { return r.fraction; }
+
+function render() {
+  $("stale-box").innerHTML = "";
+  $("error-box").innerHTML = "";
+  if (!result) { renderDownload(); return; }
+  const root = $("content");
+  root.innerHTML = "";
+  const stale = solvedBodyText !== $("request").value;
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.innerHTML =
+    `<div><span class="k">总平方残差 RSS（精确）</span><span class="v">${result.rss.fraction}</span>
+       <span class="k">≈ ${result.rss.decimal}</span></div>
+     <div><span class="k">输入指纹 SHA-256</span><span class="v" style="font-size:12px">${result.input_digest.slice(0, 24)}…</span></div>`;
+  root.appendChild(meta);
+
+  // group variables
+  const ratioByIndex = new Map();
+  const groupById = new Map(result.groups.map((g) => [g.id, g]));
+  for (const g of result.groups)
+    for (const m of g.members) ratioByIndex.set(m.index, { id: g.id, ratio: m.ratio });
+
+  root.appendChild(tableBlock("组变量（非负）",
+    ["组 ID", "变量值（分数）", "近似值", "状态"],
+    result.groupCoefficients.map((g) => {
+      const zero = g.value.numerator === 0;
+      return [`<td>${g.id}</td>`,
+        `<td class="mono">${g.value.fraction}</td>`,
+        `<td class="mono" style="color:#475569">${g.value.decimal}</td>`,
+        `<td>${zero ? "恰为零" : "非零"}</td>`].join(""),
+        zero ? "zero-row" : "";
+    })));
+
+  // per original curve coefficients, with the forced ratio shown
+  root.appendChild(tableBlock("原曲线系数（= 组变量 × 比例）",
+    ["曲线", "所属组", "固定比例", "系数（分数）", "近似值"],
+    result.coefficients.map((c) => {
+      const info = ratioByIndex.get(c.index) || {};
+      const zero = c.value.numerator === 0;
+      return [`<td>R${c.index + 1}</td>`,
+        `<td>${info.id ?? "—"}</td>`,
+        `<td class="mono">${info.ratio ? ratioText(info.ratio) : "—"}</td>`,
+        `<td class="mono">${c.value.fraction}</td>`,
+        `<td class="mono" style="color:#475569">${c.value.decimal}</td>`].join(""),
+        zero ? "zero-row" : "";
+    })));
+
+  const chartWrap = document.createElement("div");
+  chartWrap.className = "chart-wrap";
+  chartWrap.appendChild(drawChart(result.points));
+  root.appendChild(chartWrap);
+
+  const actions = document.createElement("div");
+  actions.style.margin = "12px 0";
+  const dl = document.createElement("button");
+  dl.id = "download";
+  dl.textContent = "下载精确 CSV（与图表同一次完整请求）";
+  dl.disabled = stale;
+  dl.title = stale ? "输入已修改：旧结果不可下载为当前请求结论" : "下载该响应对应的精确 CSV";
+  dl.addEventListener("click", handleDownload);
+  actions.appendChild(dl);
+  root.appendChild(actions);
+
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = `逐点数据表（${result.points.length} 行）`;
+  details.appendChild(summary);
+  const wrap = document.createElement("div");
+  wrap.style.maxHeight = "280px";
+  wrap.style.overflow = "auto";
+  wrap.appendChild(tableBlock("",
+    ["波长", "观测", "重建（分数）", "残差（分数）"],
+    result.points.map((p) => [`<td>${p.wavelength}</td>`, `<td>${p.observed}</td>`,
+      `<td class="mono">${p.reconstructed.fraction}</td>`,
+      `<td class="mono">${p.residual.fraction}</td>`].join(""))));
+  details.appendChild(wrap);
+  root.appendChild(details);
+
+  if (stale) {
+    $("stale-box").innerHTML =
+      '<div class="banner stale">⚠ 组清单或光谱已被修改：以下内容属于<strong>旧响应</strong>，' +
+      "不能证明当前请求；下载已锁定，请重新「精确复核」。</div>";
+    root.classList.add("stale-content");
+  } else {
+    root.classList.remove("stale-content");
+  }
+  $("status").textContent = "精确复核完成" +
+    (checkConsistency(result.points) ? "" : "（警告：逐点证据一致性校验未通过）");
+}
+
+function tableBlock(title, headers, rowsHtml, rowClasses) {
+  const frag = document.createDocumentFragment();
+  if (title) {
+    const h = document.createElement("div");
+    h.style.cssText = "font-size:13px;font-weight:600;margin:12px 0 2px";
+    h.textContent = title;
+    frag.appendChild(h);
+  }
+  const table = document.createElement("table");
+  table.innerHTML = "<thead><tr>" + headers.map((h) => `<th>${h}</th>`).join("") +
+    "</tr></thead><tbody>" +
+    rowsHtml.map((html, i) => `<tr class="${(rowClasses && rowClasses[i]) || ""}">${html}</tr>`).join("") +
+    "</tbody>";
+  frag.appendChild(table);
+  return frag;
+}
+
+function renderDownload() {
+  const dl = $("download");
+  if (dl) dl.disabled = true;
+}
+
+async function handleSolve() {
+  const token = generation;
+  const bodyText = $("request").value;
+  $("error-box").innerHTML = "";
+  let parsed;
+  try { parsed = JSON.parse(bodyText); }
+  catch (e) {
+    $("error-box").innerHTML = `<div class="banner error">请求 JSON 无法解析：${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  $("status").textContent = "求解中…";
+  try {
+    const response = await fetch("/api/grouped", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: bodyText,
+    });
+    const candidate = await response.json();
+    if (token !== generation) return; // superseded by an edit
+    if (!response.ok) throw new Error(candidate.error?.message || `请求失败（${response.status}）`);
+    result = candidate;
+    solvedBodyText = bodyText;
+    render();
+  } catch (error) {
+    if (token !== generation) return;
+    result = null;
+    solvedBodyText = null;
+    $("stale-box").innerHTML = "";
+    $("content").innerHTML = '<p style="color:var(--muted);font-size:13px">整次请求被拒绝，未产生任何结果。</p>';
+    $("error-box").innerHTML = `<div class="banner error">整次请求拒绝：${escapeHtml(error.message)}</div>`;
+    $("status").textContent = "已拒绝";
+  }
+}
+
+async function handleDownload() {
+  // The CSV is recomputed server-side from the SAME complete request body
+  // that produced the rendered chart; refuse if the editor moved on.
+  if (!result || solvedBodyText !== $("request").value) return;
+  const response = await fetch("/api/grouped/download", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: solvedBodyText,
+  });
+  if (!response.ok) {
+    const candidate = await response.json().catch(() => ({}));
+    $("error-box").innerHTML = `<div class="banner error">下载被拒绝：${escapeHtml(candidate.error?.message || response.status)}</div>`;
+    return;
+  }
+  const text = await response.text();
+  // Bind the file to the rendered result: the digest line must match.
+  const line = text.split("\n").find((l) => l.startsWith("# input_digest,"));
+  if (!line || line.slice("# input_digest,".length).trim() !== result.input_digest) {
+    $("error-box").innerHTML = '<div class="banner error">下载指纹与当前响应不一致，已阻止。</div>';
+    return;
+  }
+  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `grouped-spectrum-${result.input_digest.slice(0, 12)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+$("run").addEventListener("click", handleSolve);
 </script>
+</body>
+</html>

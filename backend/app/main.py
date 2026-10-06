@@ -21,7 +21,7 @@ from .models import (
 )
 from .solver import rational_rank, solve_nonnegative_least_squares
 
-from .grouped import solve_grouped
+from .grouped import GroupedError, grouped_csv, solve_grouped
 
 app = FastAPI(
     title="Spectrum NNLS Solver",
@@ -223,12 +223,34 @@ if _DIST.is_dir():
 
 @app.post("/api/grouped")
 async def grouped(body: dict):
+    # Every failure mode (bad spectra, bad group partition, bad ratios)
+    # rejects the whole request through the unified 422 envelope.
     try:
         return solve_grouped(body, _validate)
-    except ApiError:
-        raise
-    except (ValueError, TypeError, KeyError, IndexError) as error:
-        raise ApiError("invalid_grouped_request", str(error)) from error
+    except GroupedError as error:
+        raise ApiError(error.code, error.message) from error
+
+
+@app.post("/api/grouped/download")
+async def grouped_download(body: dict):
+    """Exact CSV recomputed from the same complete request body.
+
+    The client posts the exact input+groups it solved; the server validates
+    and recomputes, so the download can only describe that whole request.
+    """
+    try:
+        digest, csv_text = grouped_csv(body, _validate)
+    except GroupedError as error:
+        raise ApiError(error.code, error.message) from error
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="grouped-spectrum-{digest[:12]}.csv"'
+            )
+        },
+    )
 
 
 @app.get("/groups")

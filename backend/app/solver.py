@@ -17,8 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
+from typing import Sequence
 
 ZERO = Fraction(0)
+RationalLike = int | Fraction
 
 
 class DomainError(ValueError):
@@ -39,8 +41,8 @@ class SolveResult:
     feasible_candidates: int
 
 
-def rational_rank(columns: list[list[int]]) -> int:
-    """Rank of an integer matrix given as a list of column vectors.
+def rational_rank(columns: Sequence[Sequence[RationalLike]]) -> int:
+    """Rank of an integer/rational matrix given as a list of column vectors.
 
     Gaussian-Jordan elimination over ``Fraction``, pivoting on rows.
     """
@@ -71,17 +73,27 @@ def rational_rank(columns: list[list[int]]) -> int:
     return rank
 
 
-def _solve_linear(a: list[list[Fraction]], b: list[Fraction]) -> list[Fraction]:
+def _solve_linear(
+    a: list[list[Fraction]],
+    b: list[Fraction],
+    *,
+    allow_singular: bool = False,
+) -> list[Fraction] | None:
     """Solve ``a x = b`` by Gauss-Jordan elimination.
 
-    ``a`` is assumed square and non-singular (it is a Gram matrix of
-    linearly independent columns restricted to the chosen support).
+    The Gram matrix of the ungrouped problem restricted to a support is
+    non-singular, so by default a singular matrix is a domain error.  Group
+    blends may contain a genuinely zero column (every member curve is the
+    zero curve), in which case supports touching that column are simply
+    infeasible rather than fatal; ``allow_singular`` returns ``None`` then.
     """
     m = len(a)
     aug = [row[:] + [b[i]] for i, row in enumerate(a)]
     for col in range(m):
         pivot = next((r for r in range(col, m) if aug[r][col] != 0), None)
-        if pivot is None:  # pragma: no cover - callers guarantee full rank
+        if pivot is None:
+            if allow_singular:
+                return None
             raise DomainError("singular normal equations")
         aug[col], aug[pivot] = aug[pivot], aug[col]
         piv = aug[col][col]
@@ -94,12 +106,16 @@ def _solve_linear(a: list[list[Fraction]], b: list[Fraction]) -> list[Fraction]:
 
 
 def solve_nonnegative_least_squares(
-    observations: list[int], references: list[list[int]]
+    observations: Sequence[int],
+    references: Sequence[Sequence[RationalLike]],
+    *,
+    allow_singular: bool = False,
 ) -> SolveResult:
     """Return exact non-negative rational coefficients.
 
     Minimises ``sum_i (y_i - sum_j A_ij x_j)^2`` subject to ``x_j >= 0``,
-    by exhaustive support enumeration.
+    by exhaustive support enumeration.  Columns may carry ``Fraction``
+    entries (used by fixed-ratio group blends); integer input is exact too.
     """
     n = len(observations)
     k = len(references)
@@ -130,7 +146,12 @@ def solve_nonnegative_least_squares(
             subsets_scanned += 1
             sub_gram = [[gram[c][d] for d in support] for c in support]
             sub_aty = [aty[c] for c in support]
-            x_sub = _solve_linear(sub_gram, sub_aty)
+            x_sub = _solve_linear(
+                sub_gram, sub_aty, allow_singular=allow_singular
+            )
+            if x_sub is None:
+                # A singular face (zero blend column): no interior solution.
+                continue
             # The support means exactly these coefficients are non-zero.
             if any(v <= 0 for v in x_sub):
                 continue
